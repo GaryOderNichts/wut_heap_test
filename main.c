@@ -1,13 +1,19 @@
 #include <coreinit/time.h>
 #include <coreinit/memdefaultheap.h>
+#include <coreinit/mutex.h>
+#include <coreinit/memdefaultheap.h>
+#include <coreinit/debug.h>
+#include <coreinit/memexpheap.h>
 
 #include <whb/proc.h>
 #include <whb/log.h>
 #include <whb/log_udp.h>
 #include <whb/log_console.h>
 
-#include <malloc.h>
 #include <stdlib.h>
+
+#define USE_DL_PREFIX
+#include "malloc.h"
 
 #define TEST_COUNT      8192
 #define TEST_SIZE       32768
@@ -15,16 +21,66 @@
 
 extern void __init_wut_malloc();
 
-//#define USE_DEFAULTHEAP
-#ifdef USE_DEFAULTHEAP
-void
-__preinit_user(MEMHeapHandle *outMem1,
-               MEMHeapHandle *outFG,
-               MEMHeapHandle *outMem2)
+static OSMutex malloc_lock;
+static MEMHeapHandle mem2_handle;
+static uint32_t mem2_size;
+static void* custom_heap_base;
+static uint32_t custom_heap_size;
+
+static void *CustomAllocFromDefaultHeap(uint32_t size)
 {
+    OSLockMutex(&malloc_lock);
+    void* ptr = dlmalloc(size);
+    OSUnlockMutex(&malloc_lock);
+    return ptr;
+}
+
+static void *CustomAllocFromDefaultHeapEx(uint32_t size, int32_t alignment)
+{
+    OSLockMutex(&malloc_lock);
+    void* ptr = dlmemalign(alignment, size);
+    OSUnlockMutex(&malloc_lock);
+    return ptr;
+}
+
+static void CustomFreeToDefaultHeap(void* ptr)
+{
+    OSLockMutex(&malloc_lock);
+    dlfree(ptr);
+    OSUnlockMutex(&malloc_lock);
+}
+
+void *wiiu_morecore(long size)
+{
+    uint32_t old_size = custom_heap_size;
+    uint32_t new_size = old_size + size;
+    if (new_size > mem2_size) {
+        return (void*) -1;
+    }
+
+    custom_heap_size = new_size;
+    return ((uint8_t*) custom_heap_base) + old_size;
+}
+
+void __preinit_user(MEMHeapHandle *mem1, MEMHeapHandle *foreground, MEMHeapHandle *mem2)
+{
+    MEMAllocFromDefaultHeap = CustomAllocFromDefaultHeap;
+    MEMAllocFromDefaultHeapEx = CustomAllocFromDefaultHeapEx;
+    MEMFreeToDefaultHeap = CustomFreeToDefaultHeap;
+
+    OSInitMutex(&malloc_lock);
+
+    mem2_handle = *mem2;
+    mem2_size = MEMGetAllocatableSizeForExpHeapEx(mem2_handle, 4);
+    custom_heap_base = MEMAllocFromExpHeapEx(mem2_handle, mem2_size, 4);
+    if (!custom_heap_base) {
+        OSFatal("Cannot allocate custom heap");
+    }
+
+    custom_heap_size = 0;
+
     __init_wut_malloc();
 }
-#endif
 
 void test_malloc(void)
 {    
